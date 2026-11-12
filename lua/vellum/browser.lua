@@ -1,5 +1,6 @@
--- Bridge to render/browser.mjs: one long-lived headless browser turns mermaid
--- and D2 diagrams, display math and non-PNG images into PNGs, cached on disk by content hash.
+-- Bridge to render/browser.mjs: one long-lived headless browser turns mermaid,
+-- D2 and PlantUML diagrams, display math and non-PNG images into PNGs, cached
+-- on disk by content hash.
 local image = require('vellum.image')
 
 local M = {}
@@ -129,6 +130,24 @@ function send(out, req)
   job:write(vim.json.encode(req) .. '\n')
 end
 
+-- PlantUML is a Java program: a render starts a JVM, about a second. Every
+-- keystroke in a block makes a new key, so a request waits this long for the
+-- source to settle. A version a later draw no longer asked for (typing moved
+-- on, or the block is gone) is not sent at all; the newest one goes out.
+M.plantuml_settle_ms = 400
+local holds = {} -- out → { req, timer }, requests waiting for their source to settle
+
+local function flush(out)
+  local h = holds[out]
+  holds[out] = nil
+  if not h then return end
+  h.timer:close()
+  if pending[out] or sizes[out] then return end
+  local err = send(out, h.req)
+  if err then errors[out] = err end
+  M.on_update()
+end
+
 -- 'ready', path, { w, h, density } | 'error', message | 'pending', ms since sent
 -- density is PNG pixels per CSS px.
 local function request(key, payload)
@@ -148,6 +167,16 @@ local function request(key, payload)
     end
   end
   if sizes[out] then return 'ready', out, sizes[out] end
+  if payload.settle and not pending[out] then
+    if not holds[out] then
+      local timer = vim.uv.new_timer()
+      holds[out] = { req = payload, timer = timer }
+      timer:start(M.plantuml_settle_ms, 0, vim.schedule_wrap(function() flush(out) end))
+    end
+    wanted[out] = true -- drop_stale keeps this one, and drops the versions typing replaced
+    M.waiting = M.waiting + 1 -- output showing a pending picture is never cached
+    return 'pending', 0
+  end
   if not pending[out] then
     local err = send(out, payload)
     if err then return 'error', err end
@@ -166,12 +195,18 @@ function M.drop_stale()
       job:write(vim.json.encode({ cancel = out }) .. '\n')
     end
   end
+  for out, h in pairs(holds) do
+    if not wanted[out] then -- the source moved on: no JVM for a version nobody shows
+      holds[out] = nil
+      h.timer:close()
+    end
+  end
   wanted = {}
   stop_when_idle()
 end
 
 -- Write req.markdown, whose relative links resolve in req.dir, to req.out: a
--- .pdf or .html file, drawing D2 as diagrams do. req.kinds maps callout types to colors. Calls
+-- .pdf or .html file, drawing D2 and PlantUML as diagrams do. req.kinds maps callout types to colors. Calls
 -- done(error) when finished; error is nil on success.
 function M.export(req, done)
   if exports[req.out] then return done('already exporting to ' .. req.out) end
@@ -180,6 +215,8 @@ function M.export(req, done)
   exports[req.out] = done
   local d2 = M.d2_command()
   req.d2bin = d2 and d2.bin
+  local plantuml = M.plantuml_command()
+  req.plantumlbin = plantuml and plantuml.bin
   job:write(vim.json.encode(req) .. '\n')
 end
 
@@ -212,9 +249,35 @@ function M.d2_command()
   return d2_found or nil
 end
 
--- A diagram in `lang`, 'mermaid' or 'd2', in the colorscheme's colors. D2's
--- local icons resolve in `dir`, the markdown file's folder.
+-- The user's plantuml command, { bin, version }, or nil; looked up once.
+-- PlantUML is installed by the user (nixpkgs `plantuml` brings its Java), so
+-- it may be missing, and its blocks then stay code. A command that exists but
+-- cannot start — no Java — is no command: nil, and health says why.
+local plantuml_found
+function M.plantuml_command()
+  if plantuml_found == nil then
+    local bin = vim.fn.exepath('plantuml')
+    local r = bin ~= '' and vim.system({ bin, '-version' }, { text = true }):wait()
+    -- -version prints several lines: the first names the version
+    plantuml_found = r and r.code == 0 and { bin = bin, version = vim.trim((r.stdout or ''):match('[^\n]*') or '') } or false
+  end
+  return plantuml_found or nil
+end
+
+-- A diagram in `lang`, 'mermaid', 'd2' or 'plantuml', in the colorscheme's
+-- colors. D2's local icons and PlantUML's !include files resolve in `dir`, the
+-- markdown file's folder.
 function M.diagram(code, theme, lang, dir)
+  if lang == 'plantuml' then
+    local plantuml = M.plantuml_command()
+    if not plantuml then return 'missing' end
+    dir = dir or vim.fn.getcwd()
+    -- PlantUML brings its own theme and colors, so the theme is not part of
+    -- the key; which plantuml draws it is, as for d2
+    local by = plantuml.bin .. ' ' .. plantuml.version
+    local key = table.concat({ 'plantuml', by, dir, code }, '\0')
+    return request(key, { plantuml = code, dir = dir, bin = plantuml.bin, settle = true })
+  end
   if lang == 'd2' then
     dir = dir or vim.fn.getcwd()
     local d2 = M.d2_command()

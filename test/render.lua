@@ -1,6 +1,7 @@
--- Renderer check: draws every diagram in test/diagrams.md and test/d2.md,
--- the display math in test/sample.md and test/images/* with the real
--- renderer, then exports a document with diagrams to HTML and PDF.
+-- Renderer check: draws every diagram in test/diagrams.md and test/d2.md and,
+-- when plantuml is installed, test/plantuml.md; the display math in
+-- test/sample.md and test/images/* with the real renderer, then exports a
+-- document with diagrams to HTML and PDF.
 -- Run: nvim --clean -l test/render.lua [--update]   (needs the built renderer)
 -- D2, KaTeX and images carry their own fonts or pixels, so their PNG sizes
 -- must match test/render.sizes; --update rewrites the entries for the
@@ -38,6 +39,36 @@ end
 for i, f in ipairs(fences('test/d2.md', 'd2')) do
   jobs[#jobs + 1] = { label = d2_group .. ' ' .. i, group = d2_group, broken = f[2], ask = function() return browser.diagram(f[1], theme, 'd2', root .. '/test') end }
 end
+-- the JVM and the system fonts draw PlantUML, so no size is compared: it only
+-- has to render. It is the user's program, so it may not be here at all.
+local plantuml = browser.plantuml_command()
+if plantuml then
+  for i, f in ipairs(fences('test/plantuml.md', 'plantuml')) do
+    jobs[#jobs + 1] = { label = 'plantuml ' .. i, broken = f[2], ask = function() return browser.diagram(f[1], theme, 'plantuml', root .. '/test') end }
+  end
+else
+  print('NOTE plantuml is not installed: test/plantuml.md not rendered')
+end
+-- A JVM that can open a window shows a Dock icon and takes focus on macOS, so
+-- the render asks for none. The stub only answers when the env says headless.
+local stub = vim.fn.tempname()
+vim.fn.writefile({
+  '#!/bin/sh',
+  'case "$JAVA_TOOL_OPTIONS" in',
+  '  *-Djava.awt.headless=true*) ;;',
+  '  *) echo "plantuml ran without -Djava.awt.headless=true" >&2; exit 1 ;;',
+  'esac',
+  'cat >/dev/null',
+  [[printf '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#fff"/></svg>']],
+}, stub)
+vim.uv.fs_chmod(stub, 493)
+jobs[#jobs + 1] = { label = 'plantuml starts headless', ask = function()
+  local command = browser.plantuml_command
+  browser.plantuml_command = function() return { bin = stub, version = 'stub' } end
+  local state, file = browser.diagram('Alice -> Bob: hi', theme, 'plantuml')
+  browser.plantuml_command = command
+  return state, file
+end }
 for i, f in ipairs(fences('test/sample.md', 'math')) do
   jobs[#jobs + 1] = { label = 'math ' .. i, group = 'katex', broken = f[2], ask = function() return browser.math(f[1], theme.math) end }
 end
@@ -91,6 +122,8 @@ end
 local dir = vim.fn.tempname()
 vim.fn.mkdir(dir, 'p')
 local doc = '# Export\n\n```mermaid\ngraph LR; A --> B\n```\n\n```d2\nx -> y\n```\n\n```d2\nx ->\n```\n'
+-- PlantUML only when it is here: without it those blocks would stay code
+if plantuml then doc = doc .. '\n```plantuml\nAlice -> Bob: export\n```\n\n```plantuml\nclass A {\n```\n' end
 for _, ext in ipairs({ 'html', 'pdf' }) do
   local out, done, err = dir .. '/doc.' .. ext, false, nil
   browser.export({ markdown = doc, dir = dir, out = out, kinds = {} }, function(e) done, err = true, e end)
@@ -99,8 +132,9 @@ for _, ext in ipairs({ 'html', 'pdf' }) do
 end
 local html = table.concat(vim.fn.readfile(dir .. '/doc.html'), '\n')
 local count = function(pat) return select(2, html:gsub(pat, '')) end
-if count('class="mermaid"') ~= 1 or count('class="diagram"') ~= 1 or count('language%-d2') ~= 1 then
-  fail('export html: mermaid, D2 and broken D2 not as expected')
+if count('class="mermaid"') ~= 1 or count('language%-d2') ~= 1
+  or count('class="diagram"') ~= (plantuml and 2 or 1) or count('language%-plantuml') ~= (plantuml and 1 or 0) then
+  fail('export html: mermaid, D2 and broken D2, and PlantUML and broken PlantUML, not as expected')
 end
 if (vim.uv.fs_stat(dir .. '/doc.pdf') or { size = 0 }).size == 0 then fail('export pdf: empty') end
 

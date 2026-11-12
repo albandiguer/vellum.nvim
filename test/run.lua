@@ -583,6 +583,55 @@ do
     theme.d2.themeID == (vim.o.background == 'dark' and 200 or 0) and theme.d2.themeOverrides.N7 == theme.mermaid.background)
 end
 
+-- PlantUML: a third external renderer. Its command is the user's program, so
+-- it may be missing (the block is then code) and its path and version are part
+-- of the cache key; a render waits for the source to settle, since each one
+-- starts a JVM (~1 s) and typing makes a new key per keystroke
+do
+  local browser = require('vellum.browser')
+  local theme = require('vellum.theme')
+  local cache = vim.fn.stdpath('cache') .. '/vellum'
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, 'p')
+  local supported, tgc, diagram, command = image.supported, vim.o.termguicolors, browser.diagram, browser.plantuml_command
+  image.supported, vim.o.termguicolors = true, true
+
+  -- the fence reaches the diagram path, alias included
+  local asked, png = {}, write_png(dir .. '/p.png', 300, 100, phys(7559))
+  browser.diagram = function(_, _, lang) asked[#asked + 1] = lang; return 'ready', png, { 300, 100, 2 } end
+  doc('```plantuml\nAlice -> Bob: hi\n```\n\n```puml\nAlice -> Bob: hi\n```\n\n```uml\nAlice -> Bob: hi\n```')
+  browser.diagram = diagram
+  check('plantuml and puml are diagrams, uml is a code block', #asked == 2 and asked[1] == 'plantuml' and asked[2] == 'plantuml',
+    vim.inspect(asked))
+
+  -- no command: its code, never an error box
+  browser.plantuml_command = function() return nil end
+  local lines = doc('```plantuml\nAlice -> Bob: hi\n```')
+  browser.plantuml_command = command
+  check('plantuml missing shows its code, not an error', find(lines, 'Alice %-> Bob: hi') ~= nil and not find(lines, '✗'), vim.inspect(lines))
+
+  -- the binary and its version are the picture: an upgrade renders anew
+  local function key(version) return table.concat({ 'plantuml', '/opt/plantuml ' .. version, dir, 'Alice -> Bob: hi' }, '\0') end
+  local function cached(k) return write_png(cache .. '/' .. vim.fn.sha256(k):sub(1, 32) .. '.png', 300, 100, phys(7559)) end
+  browser.plantuml_command = function() return { bin = '/opt/plantuml', version = '1.2025.4' } end
+  local first = cached(key('1.2025.4'))
+  local state, file = browser.diagram('Alice -> Bob: hi', theme, 'plantuml', dir)
+  check('a plantuml picture is found by its key', state == 'ready' and file == first, vim.inspect({ state, file }))
+
+  -- settling: an uncached picture is not sent before the source has been still
+  local settle = browser.plantuml_settle_ms
+  browser.plantuml_settle_ms = 3600000 -- no JVM starts in this suite
+  browser.plantuml_command = function() return { bin = '/opt/plantuml', version = '1.2025.5' } end
+  state, file = browser.diagram('Alice -> Bob: hi', theme, 'plantuml', dir)
+  check('a new plantuml version is a new picture', state == 'pending' and file ~= first, vim.inspect({ state, file }))
+  check('a settling plantuml render is not sent yet', not browser.busy())
+  state = browser.diagram('Alice -> Bob: hi', theme, 'plantuml', dir)
+  check('plantuml waits for the source to settle', state == 'pending' and not browser.busy(), tostring(state))
+  browser.plantuml_settle_ms = settle
+  browser.plantuml_command = command
+  image.supported, vim.o.termguicolors = supported, tgc
+end
+
 -- Obsidian: callouts, ==highlight==, [[wikilinks]]
 do
   local lines = doc('> [!question]- Why *here*?\n> body line')

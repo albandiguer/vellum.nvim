@@ -1,5 +1,5 @@
--- Code blocks: shaded panels with tree-sitter syntax colors, and mermaid
--- and D2 diagrams rendered to images.
+-- Code blocks: shaded panels with tree-sitter syntax colors, and mermaid,
+-- D2 and PlantUML diagrams rendered to images.
 local image = require('vellum.image')
 local browser = require('vellum.browser')
 local theme = require('vellum.theme')
@@ -90,11 +90,13 @@ function M.panel(code, lang, width, label, err)
   return out
 end
 
--- A diagram in `lang`, 'mermaid' or 'd2', as a picture; its code while it
--- first renders, or with the error when it cannot.
+-- A diagram in `lang`, 'mermaid', 'd2' or 'plantuml', as a picture; its code
+-- while it first renders, or with the error when it cannot.
 function M.diagram(code, width, row, lang)
   if image.problem() then return M.panel(code, lang, width, nil, image.problem()) end
   local state, a, b = browser.diagram(code, theme, lang, media.dir)
+  -- plantuml is not installed: its code, as for a diagram this terminal cannot show
+  if state == 'missing' then return M.panel(code, lang, width) end
   if state == 'ready' then
     last_diagram[row] = media.picture(a, b[1], b[2], width, b[3])
     return last_diagram[row]

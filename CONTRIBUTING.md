@@ -19,7 +19,7 @@ nvim --clean -l test/render.lua   # real renderer: every test diagram, math, ima
 ```
 
 - `test/render.lua` compares picture sizes with `test/render.sizes`. If you change how pictures look on purpose, run it with `--update` and say why in the commit.
-- Changes you can see need a look in kitty or Ghostty (and tmux if they touch images). `test/d2.md` and `test/diagrams.md` hold big diagrams for this.
+- Changes you can see need a look in kitty or Ghostty (and tmux if they touch images). `test/d2.md` and `test/diagrams.md` hold big diagrams for this; `test/plantuml.md` needs `plantuml` installed.
 - A bug fix comes with a check that fails without it.
 
 ## Code map

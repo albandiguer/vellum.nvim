@@ -5,7 +5,7 @@ A live markdown preview inside Neovim. It opens beside your buffer, in the termi
 ![Demo: open the preview, edit a label in a mermaid diagram and watch it redraw, zoom and pan it, edit a D2 platform map, then move through KaTeX math, a sequence diagram and a state machine while the preview follows. Kanagawa Dragon colorscheme.](docs/demo.webp)
 
 - **Live.** Every keystroke re-renders. Only changed blocks are redrawn, so long documents stay fast.
-- **Diagrams.** Mermaid and D2 render as images in your colorscheme's colors, sized to your font.
+- **Diagrams.** Mermaid and D2 render as images in your colorscheme's colors, sized to your font; PlantUML too, if it is installed.
 - **Math.** Inline `$…$` becomes Unicode text; display math renders with KaTeX.
 - **Scroll sync, both ways.** The preview follows your cursor; scrolling the preview scrolls the source.
 - **Zoom.** Open any diagram or image full-screen, then zoom and pan.
@@ -119,6 +119,10 @@ vim.api.nvim_create_autocmd('ColorScheme', {
 - Markdown, LaTeX and code labels render.
 - Only the main board is drawn; `layers`, `scenarios` and `steps` are not.
 
+**PlantUML** needs the [`plantuml`](https://plantuml.com) command, and Java to run it (nixpkgs `plantuml` brings both). Without it, ` ```plantuml ` blocks stay code; `:checkhealth vellum` says what is missing. `!include` and `!theme` paths resolve beside the markdown file. A render waits for a pause in your typing, because every run starts a Java VM.
+
+PlantUML draws in its own colors: the diagram's `!theme` and `skinparam` lines win, and the preview does not recolor it to your colorscheme. A syntax error shows as an error under the block, as for mermaid and D2.
+
 Each picture renders once and is cached on disk (up to 100 MB).
 
 ## What renders
@@ -131,7 +135,7 @@ Each picture renders once and is cached on disk (up to 100 MB).
 | Quotes, `> [!NOTE]` alerts, Obsidian callouts | colored bar and title |
 | Tables | aligned, wrapped to fit |
 | Code blocks | syntax colors, language label |
-| ` ```mermaid `, ` ```d2 ` | image (code outside kitty and Ghostty) |
+| ` ```mermaid `, ` ```d2 `, ` ```plantuml ` | image (code outside kitty and Ghostty; PlantUML only when installed) |
 | `$…$`, `$$…$$`, ` ```math ` | Unicode text inline; KaTeX image for display math |
 | Images: PNG, JPG, GIF, WebP, SVG, local or web | image (alt text elsewhere) |
 | Footnotes | superscript refs, notes at the end |

@@ -1,0 +1,2 @@
+' Included by test/plantuml.md: !include paths resolve in the markdown file's folder
+:read the fence;

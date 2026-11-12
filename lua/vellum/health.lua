@@ -28,6 +28,22 @@ local function renderer()
   else
     h.error('D2 failed: ' .. err, { 'Rebuild the renderer: :Vellum build' })
   end
+  -- PlantUML is the user's program, not ours: missing is a note, a command
+  -- that cannot run (no Java) is the error
+  local plantuml = browser.plantuml_command()
+  if plantuml then
+    ok, err = render('checkhealth -> vellum: ' .. vim.uv.hrtime(), 'plantuml')
+    if ok then
+      h.ok('PlantUML diagrams render, with ' .. plantuml.bin .. ' (' .. plantuml.version .. ')')
+    else
+      h.error('PlantUML failed: ' .. err, { 'Run `plantuml -version` to see why' })
+    end
+  elseif vim.fn.executable('plantuml') == 0 then
+    h.info('PlantUML is not installed, so ```plantuml blocks show as code',
+      { 'Install it, for example nixpkgs `plantuml` or `brew install plantuml`' })
+  else
+    h.error('plantuml is installed but did not run (it needs Java)', { 'Install a Java runtime, then run `plantuml -version`' })
+  end
 end
 
 local function images()

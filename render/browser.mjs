@@ -2,9 +2,12 @@
 //   {"out": "/abs/file.png", "code": "...", "theme": {...}}   a mermaid diagram
 //   {"out": "/abs/file.png", "d2": "...", "theme": {...}, "dir": "/abs/dir", "bin": "/abs/d2"}   a D2 diagram; local icons
 //     resolve in dir; bin, the user's d2 command, renders it when given
+//   {"out": "/abs/file.png", "plantuml": "...", "dir": "/abs/dir", "bin": "/abs/plantuml"}   a PlantUML
+//     diagram, drawn by bin in dir, so !include and !theme files resolve
 //   {"out": "/abs/file.png", "image": "/abs/path or https://..."}   any image the browser can show
 //   {"out": "/abs/file.png", "math": "\\frac{a}{b}", "color": "#rrggbb"}   display math, by KaTeX
-//   {"out": "/abs/doc.pdf" or ".html", "markdown": "...", "dir": "/abs/dir", "kinds": {...}, "d2bin": "/abs/d2"}   a document export
+//   {"out": "/abs/doc.pdf" or ".html", "markdown": "...", "dir": "/abs/dir", "kinds": {...},
+//    "d2bin": "/abs/d2", "plantumlbin": "/abs/plantuml"}   a document export
 // Each picture request may carry "maxPixels", a cap on the PNG's pixels.
 // It answers one JSON line: {"out"} when the PNG is written, or {"out", "error"}.
 // A real browser renders exactly what GitHub renders; a fake DOM mis-measures
@@ -174,21 +177,60 @@ const d2diagram = async ({ d2: code, theme, dir, bin }) => {
   } catch (e) {
     return String(e?.message ?? e).slice(0, 600);
   }
-  return page.evaluate(async (svg) => {
-    const c = document.getElementById('c');
-    c.innerHTML = svg;
-    // icons load after the svg is in; listening in this same task misses none.
-    // One that fails or hangs leaves its space empty, the diagram still shows
-    const icons = [...c.querySelectorAll('image')].map((i) => new Promise((done) => {
-      i.addEventListener('load', done);
-      i.addEventListener('error', done);
-      setTimeout(done, 10000);
-    }));
-    await Promise.all(icons);
-    await document.fonts.ready; // D2 embeds its fonts; a shot before they load shows fallback glyphs
-    return null;
-  }, svg);
+  return svgpage(svg);
 };
+
+// Put an SVG in the page and take the shot over it; what it loads — icons,
+// fonts — must be in, or the picture shows empty boxes and fallback glyphs.
+const svgpage = (svg) => page.evaluate(async (svg) => {
+  const c = document.getElementById('c');
+  c.innerHTML = svg;
+  // icons load after the svg is in; listening in this same task misses none.
+  // One that fails or hangs leaves its space empty, the diagram still shows
+  const icons = [...c.querySelectorAll('image')].map((i) => new Promise((done) => {
+    i.addEventListener('load', done);
+    i.addEventListener('error', done);
+    setTimeout(done, 10000);
+  }));
+  await Promise.all(icons);
+  await document.fonts.ready; // D2 embeds its fonts; a shot before they load shows fallback glyphs
+  return null;
+}, svg);
+
+const plantumldiagram = async ({ plantuml: code, dir, bin }) => {
+  try {
+    return await svgpage(await plantumlcommand(bin, code, dir));
+  } catch (e) {
+    return String(e?.message ?? e).slice(0, 600);
+  }
+};
+
+// PlantUML source → SVG with the plantuml command, in `dir` so !include and
+// !theme files resolve. -pipe reads the diagram from stdin; a fence without
+// @startuml/@enduml gets them, as the PlantUML server does. -failfast2 makes
+// a syntax error exit non-zero; it would otherwise draw the error in the picture.
+function plantumlcommand(bin, source, dir) {
+  return new Promise((done, fail) => {
+    // A render needs no window, and a JVM that can open one shows a Dock icon
+    // and takes focus on macOS. JAVA_TOOL_OPTIONS is the one place every
+    // plantuml script (brew, nixpkgs, the jar's own) passes on to the JVM.
+    const env = { ...process.env, JAVA_TOOL_OPTIONS: `${(process.env.JAVA_TOOL_OPTIONS ?? '').trim()} -Djava.awt.headless=true`.trim() };
+    const p = spawn(bin, ['-failfast2', '-tsvg', '-pipe'], { cwd: dir, timeout: 30000, env });
+    const out = [], err = [];
+    p.stdout.on('data', (b) => out.push(b));
+    p.stderr.on('data', (b) => err.push(b));
+    p.on('error', fail);
+    p.on('close', (code, signal) => {
+      if (code === 0) return done(Buffer.concat(out).toString());
+      // the JVM says it picked JAVA_TOOL_OPTIONS up; that is not an error
+      const lines = Buffer.concat(err).toString().split('\n').map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('Picked up JAVA_TOOL_OPTIONS'));
+      fail(new Error(signal ? 'plantuml took longer than 30 s'
+        : lines.slice(-3).join('\n') || `plantuml exited with ${code}`));
+    });
+    p.stdin.end(/^[ \t]*@startuml/m.test(source) ? source : `@startuml\n${source}\n@enduml`);
+  });
+}
 
 const picture = ({ image }) => {
   // local files go in as data URLs: an about:blank page may not read file://
@@ -286,7 +328,7 @@ img, .mermaid svg, .diagram svg { max-width: 100%; }
 pre, table, img, .mermaid, .diagram, .katex-display { break-inside: avoid; }
 `;
 
-async function exportDoc({ markdown: text, dir, out, kinds, d2bin }) {
+async function exportDoc({ markdown: text, dir, out, kinds, d2bin, plantumlbin }) {
   markdown ??= await exporter().catch((e) => {
     throw new Error('export needs a rebuilt renderer (:Vellum build): ' + e.message);
   });
@@ -334,14 +376,18 @@ async function exportDoc({ markdown: text, dir, out, kinds, d2bin }) {
       }
       await document.fonts.ready;
     }, kinds);
-    // D2 compiles in node, in its own light theme; a broken diagram, or a
-    // build without D2, stays as its source
-    const sources = await doc.$$eval('pre > code.language-d2', (codes) => codes.map((c) => c.textContent));
-    if (sources.length) {
+    // D2 compiles in node, in its own light theme; PlantUML runs the user's
+    // command. A broken diagram, or a build without them, stays as its source
+    for (const [lang, svgfor] of [
+      ['d2', (code) => d2svg(code, undefined, dir, d2bin)],
+      ['plantuml', (code) => plantumlcommand(plantumlbin, code, dir)],
+    ]) {
+      const sources = await doc.$$eval(`pre > code.language-${lang}`, (codes) => codes.map((c) => c.textContent));
+      if (!sources.length) continue;
       const svgs = [];
-      for (const code of sources) svgs.push(await d2svg(code, undefined, dir, d2bin).catch(() => null));
-      await doc.evaluate(async (svgs) => {
-        const codes = [...document.querySelectorAll('pre > code.language-d2')];
+      for (const code of sources) svgs.push(await svgfor(code).catch(() => null));
+      await doc.evaluate(async (svgs, lang) => {
+        const codes = [...document.querySelectorAll(`pre > code.language-${lang}`)];
         svgs.forEach((svg, i) => {
           if (!svg) return;
           const box = document.createElement('div');
@@ -350,7 +396,7 @@ async function exportDoc({ markdown: text, dir, out, kinds, d2bin }) {
           codes[i].parentElement.replaceWith(box);
         });
         await document.fonts.ready;
-      }, svgs);
+      }, svgs, lang);
     }
     if (out.endsWith('.pdf')) {
       await doc.pdf({ path: out, format: 'A4', printBackground: true, margin: { top: '12mm', bottom: '12mm', left: '10mm', right: '10mm' } });
@@ -415,8 +461,10 @@ function withDensity(png, scale) {
 
 async function render(req) {
   if (req.markdown != null) return exportDoc(req);
-  // mermaid keeps the container's padding; D2 pads itself; images and math are shot at their own size
-  const [draw, shot] = req.image ? [picture, '#c img'] : req.math != null ? [formula, '#m'] : req.d2 != null ? [d2diagram, '#c > svg'] : [diagram, '#c'];
+  // mermaid and PlantUML keep the container's padding: a PlantUML block may
+  // hold more than one diagram. D2 pads itself; images and math are shot bare.
+  const [draw, shot] = req.image ? [picture, '#c img'] : req.math != null ? [formula, '#m']
+    : req.d2 != null ? [d2diagram, '#c > svg'] : req.plantuml != null ? [plantumldiagram, '#c'] : [diagram, '#c'];
   const error = await draw(req);
   if (error) return { out: req.out, error };
   const element = await page.$(shot);
